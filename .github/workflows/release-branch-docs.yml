@@ -1,0 +1,33 @@
+name: Release branch docs
+
+on:
+  push:
+    branches:
+      - "release/**"
+  pull_request:
+    branches:
+      - "release/**"
+
+permissions:
+  contents: read
+
+jobs:
+  docs-version:
+    name: Docs version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the docs are versioned for this release branch
+        env:
+          BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: |
+          VERSION="${BRANCH#release/}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::notice::$BRANCH is not a release/vX.Y.Z branch. Nothing to check."
+            exit 0
+          fi
+          .github/workflow-scripts/check-docs-version.sh "$VERSION" .
