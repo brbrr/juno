@@ -35,7 +35,7 @@ jobs:
     name: Verify
     runs-on: ubuntu-latest
     permissions:
-      contents: write # only to list draft releases; this job writes nothing
+      contents: write # to list draft releases and to create a missing notes draft
     outputs:
       sha: ${{ steps.check.outputs.sha }}
       prerelease: ${{ steps.check.outputs.prerelease }}
@@ -86,6 +86,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
+          SHA: ${{ steps.check.outputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           drafts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
             --jq '[.[] | select(.draft and (.name == env.VERSION or .tag_name == env.VERSION))]' | jq -s 'add // []')
@@ -94,12 +96,25 @@ jobs:
             echo "::error::$count draft releases are named $VERSION. Keep one."
             exit 1
           fi
-          jq -r '.[0].body // ""' <<<"$drafts" > notes.md
-          if [ -s notes.md ]; then
-            { echo "## Release notes"; echo; cat notes.md; } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "No release notes draft for $VERSION. The release uses generated notes." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$count" -eq 0 ]; then
+            # A draft does not create the tag. Publish deletes this draft and creates the release again.
+            url=$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$VERSION" -f name="$VERSION" \
+              -f target_commitish="$SHA" -F draft=true -F generate_release_notes=true --jq .html_url)
+            echo "No release notes draft for $VERSION. Created [a draft with generated notes]($url). Review it, then run the release again." \
+              >> "$GITHUB_STEP_SUMMARY"
+            if [ "$DRY_RUN" = true ]; then
+              echo "::warning::No release notes draft for $VERSION. Created one with generated notes: $url"
+              exit 0
+            fi
+            echo "::error::No release notes draft for $VERSION. Created one with generated notes: $url. Review it, then run the release again."
+            exit 1
           fi
+          jq -r '.[0].body // ""' <<<"$drafts" > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::The release notes draft for $VERSION is empty. Write the notes, then run the release again."
+            exit 1
+          fi
+          { echo "## Release notes"; echo; cat notes.md; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the release notes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
@@ -292,9 +307,8 @@ jobs:
             while read -r id; do gh api -X DELETE "repos/$GH_REPO/releases/$id"; done
 
           # Work only with the id of this draft: another writer can create drafts with the same tag.
-          args=(-f tag_name="$VERSION" -f name="$VERSION" -F draft=true -F prerelease="$PRERELEASE")
-          if [ -s notes/notes.md ]; then args+=(-F body=@notes/notes.md); else args+=(-F generate_release_notes=true); fi
-          id=$(gh api "repos/$GH_REPO/releases" "${args[@]}" --jq .id)
+          id=$(gh api "repos/$GH_REPO/releases" -f tag_name="$VERSION" -f name="$VERSION" -F draft=true \
+            -F prerelease="$PRERELEASE" -F body=@notes/notes.md --jq .id)
           for f in binaries/juno-*.zip binaries/SHA256SUMS; do
             curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
               --data-binary @"$f" "https://uploads.github.com/repos/$GH_REPO/releases/$id/assets?name=$(basename "$f")" > /dev/null
