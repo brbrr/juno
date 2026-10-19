@@ -8,9 +8,9 @@ import (
 
 const shortSHA = 12
 
-// prFinder finds the approved pull request that produced a commit on a release branch.
+// prFinder decides about the pull request that produced a commit on a release branch.
 type prFinder interface {
-	approvedPR(ctx context.Context, base, sha string) (int, error)
+	checkPR(ctx context.Context, base, sha string) (prVerdict, error)
 }
 
 // verdict tells why a commit is accepted, or why it is rejected.
@@ -73,16 +73,19 @@ func (c *checker) checkCommit(ctx context.Context, cm commit, mainSHA string) (v
 	if err != nil {
 		return verdict{}, err
 	}
+	reason := "not on main, not docs only, no approved pull request"
 	for _, branch := range branches {
-		n, err := c.prs.approvedPR(ctx, branch, cm.sha)
-		if err != nil {
+		pr, err := c.prs.checkPR(ctx, branch, cm.sha)
+		switch {
+		case err != nil:
 			return verdict{}, err
-		}
-		if n != 0 {
-			return verdict{commit: cm, accepted: true, reason: fmt.Sprintf("approved pull request #%d", n)}, nil
+		case pr.approved:
+			return verdict{commit: cm, accepted: true, reason: fmt.Sprintf("approved pull request #%d", pr.number)}, nil
+		case pr.number != 0:
+			reason += fmt.Sprintf(": pull request #%d: %s", pr.number, pr.reason)
 		}
 	}
-	return verdict{commit: cm, reason: "not on main, not docs only, no approved pull request"}, nil
+	return verdict{commit: cm, reason: reason}, nil
 }
 
 // docsOnly reports whether files is not empty and every file is under docs/.

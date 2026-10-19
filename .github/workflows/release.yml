@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # to list draft releases and to create a missing notes draft
+      pull-requests: read # to check the pull requests into release branches
     outputs:
       sha: ${{ steps.check.outputs.sha }}
       prerelease: ${{ steps.check.outputs.prerelease }}

@@ -38,8 +38,31 @@ type review struct {
 }
 
 type prCommit struct {
+	SHA       string   `json:"sha"`
 	Author    *account `json:"author"`
 	Committer *account `json:"committer"`
+	Commit    struct {
+		Verification struct {
+			Verified bool `json:"verified"`
+		} `json:"verification"`
+	} `json:"commit"`
+}
+
+type timelineEvent struct {
+	Event string `json:"event"`
+}
+
+// webFlow is the committer of commits that github.com makes for a person, such as an applied suggestion.
+const webFlow = "web-flow"
+
+const noApproval = "no approval of its last commit from a writer who did not write, open or merge it"
+
+// prVerdict tells whether the pull request that produced a commit counts as reviewed.
+// number is 0 if no merged pull request produced the commit.
+type prVerdict struct {
+	number   int
+	approved bool
+	reason   string // why the pull request does not count
 }
 
 // githubClient finds approved pull requests through the GitHub REST API.
@@ -61,40 +84,55 @@ func newGitHubClient(baseURL, repo, token string) *githubClient {
 	}
 }
 
-// approvedPR returns the number of the pull request merged into base with squash commit sha, if a
-// person with write access who did not write, open or merge it approved its last commit.
-// It returns 0 if there is none.
-func (c *githubClient) approvedPR(ctx context.Context, base, sha string) (int, error) {
+// checkPR finds the pull request merged into base with squash commit sha, and decides if it counts as
+// reviewed: a person with write access who did not write, open or merge it approved its last commit.
+func (c *githubClient) checkPR(ctx context.Context, base, sha string) (prVerdict, error) {
 	prs, err := c.mergedPRs(ctx, base)
 	if err != nil {
-		return 0, err
+		return prVerdict{}, err
 	}
 	for i := range prs {
-		pr := &prs[i]
-		if pr.MergeCommitSHA != sha {
-			continue
+		if prs[i].MergeCommitSHA == sha {
+			reason, err := c.rejection(ctx, &prs[i])
+			return prVerdict{number: prs[i].Number, approved: reason == "", reason: reason}, err
 		}
-		path := fmt.Sprintf("/repos/%s/pulls/%d", c.repo, pr.Number)
-		reviews, err := getPages[review](ctx, c, path+"/reviews")
-		if err != nil {
-			return 0, err
-		}
-		commits, err := getPages[prCommit](ctx, c, path+"/commits")
-		if err != nil {
-			return 0, err
-		}
-		for _, login := range approvers(reviews, pr.Head.SHA, participants(pr, commits)) {
-			ok, err := c.canWrite(ctx, login)
-			if err != nil {
-				return 0, err
-			}
-			if ok {
-				return pr.Number, nil
-			}
-		}
-		return 0, nil
 	}
-	return 0, nil
+	return prVerdict{}, nil
+}
+
+// rejection returns why the pull request does not count as reviewed, or "" if it does.
+func (c *githubClient) rejection(ctx context.Context, pr *pullRequest) (string, error) {
+	events, err := getPages[timelineEvent](ctx, c, fmt.Sprintf("/repos/%s/issues/%d/timeline", c.repo, pr.Number))
+	if err != nil {
+		return "", err
+	}
+	for _, e := range events {
+		// An approval does not record the base it was given against, so a new base can add
+		// commits that the approver did not see.
+		if e.Event == "base_ref_changed" || e.Event == "base_ref_force_pushed" {
+			return "its base branch changed", nil
+		}
+	}
+	path := fmt.Sprintf("/repos/%s/pulls/%d", c.repo, pr.Number)
+	commits, err := getPages[prCommit](ctx, c, path+"/commits")
+	if err != nil {
+		return "", err
+	}
+	excluded, unverified := participants(pr, commits)
+	if unverified != "" {
+		return fmt.Sprintf("commit %s has no verified signature", unverified), nil
+	}
+	reviews, err := getPages[review](ctx, c, path+"/reviews")
+	if err != nil {
+		return "", err
+	}
+	for _, login := range approvers(reviews, pr.Head.SHA, excluded) {
+		ok, err := c.canWrite(ctx, login)
+		if err != nil || ok {
+			return "", err
+		}
+	}
+	return noApproval, nil
 }
 
 // mergedPRs returns the merged pull requests into base.
@@ -128,18 +166,22 @@ func (c *githubClient) canWrite(ctx context.Context, login string) (bool, error)
 	return p.Permission == "admin" || p.Permission == "write", err
 }
 
-// participants returns the logins that opened or merged the pull request or wrote one of its commits.
-// Commit identities can be forged; signed commits on release branches make them reliable.
-func participants(pr *pullRequest, commits []prCommit) map[string]bool {
-	logins := map[string]bool{pr.User.Login: true, pr.MergedBy.Login: true}
+// participants returns the logins that opened or merged the pull request or made one of its commits.
+// Anyone can put any email in a commit, so a commit counts only with a verified signature, which binds
+// the committer to the account that signed. github.com signs the commits it makes, with the person as
+// author. unverified is the first commit without a reliable identity, or "".
+func participants(pr *pullRequest, commits []prCommit) (logins map[string]bool, unverified string) {
+	logins = map[string]bool{pr.User.Login: true, pr.MergedBy.Login: true}
 	for _, cm := range commits {
-		for _, a := range []*account{cm.Author, cm.Committer} {
-			if a != nil {
-				logins[a.Login] = true
-			}
+		if !cm.Commit.Verification.Verified || cm.Committer == nil || (cm.Committer.Login == webFlow && cm.Author == nil) {
+			return nil, cm.SHA
+		}
+		logins[cm.Committer.Login] = true
+		if cm.Author != nil {
+			logins[cm.Author.Login] = true
 		}
 	}
-	return logins
+	return logins, ""
 }
 
 // approvers returns, sorted, the logins outside excluded whose latest decisive review approves head.

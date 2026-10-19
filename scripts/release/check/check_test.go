@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type fakePRs map[string]int // "base sha" -> pull request number
+type fakePRs map[string]prVerdict // "base sha" -> verdict
 
-func (f fakePRs) approvedPR(_ context.Context, base, sha string) (int, error) {
+func (f fakePRs) checkPR(_ context.Context, base, sha string) (prVerdict, error) {
 	return f[base+" "+sha], nil
 }
 
@@ -28,6 +28,7 @@ func TestCheck(t *testing.T) {
 	reviewed := r.commit("release fix", map[string]string{"c.go": "package c\n"})
 	r.run("update-ref", "refs/remotes/origin/release/v1.0.0", reviewed)
 	unreviewed := r.commit("unreviewed", map[string]string{"d.go": "package d\n"})
+	retargeted := r.commit("retargeted", map[string]string{"e.go": "package e\n"})
 	r.run("mv", "docs/guide.md", "guide.md")
 	moved := r.commit("move docs", nil)
 	empty := r.commit("empty", nil)
@@ -38,7 +39,10 @@ func TestCheck(t *testing.T) {
 	merge := r.head()
 	r.run("update-ref", "refs/remotes/origin/release/v1.0.1", merge)
 
-	c := &checker{git: r.git, prs: fakePRs{"release/v1.0.0 " + reviewed: 7}}
+	c := &checker{git: r.git, prs: fakePRs{
+		"release/v1.0.0 " + reviewed:   {number: 7, approved: true},
+		"release/v1.0.1 " + retargeted: {number: 8, reason: "its base branch changed"},
+	}}
 	verdicts, err := c.check(t.Context(), base, mainTip, merge)
 	require.NoError(t, err)
 
@@ -56,6 +60,7 @@ func TestCheck(t *testing.T) {
 		docs:       {true, "docs only"},
 		reviewed:   {true, "approved pull request #7"},
 		unreviewed: {false, notReviewed},
+		retargeted: {false, notReviewed + ": pull request #8: its base branch changed"},
 		moved:      {false, notReviewed},
 		empty:      {false, notReviewed},
 		side:       {true, "docs only"},
