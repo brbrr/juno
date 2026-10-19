@@ -36,10 +36,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # to list draft releases and to create a missing notes draft
-      pull-requests: read # to check the pull requests into release branches
     outputs:
       sha: ${{ steps.check.outputs.sha }}
       prerelease: ${{ steps.check.outputs.prerelease }}
+      review: ${{ steps.check.outputs.review }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +56,6 @@ jobs:
       - name: Check the version and the commits
         id: check
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           REF: ${{ inputs.ref }}
           VERSION: ${{ inputs.version }}
         run: >-
@@ -67,21 +66,19 @@ jobs:
       - name: Check the docs version
         env:
           SHA: ${{ steps.check.outputs.sha }}
+          REF: ${{ inputs.ref }}
           VERSION: ${{ inputs.version }}
-          PRERELEASE: ${{ steps.check.outputs.prerelease }}
         run: |
           git worktree add --detach "$RUNNER_TEMP/release-src" "$SHA"
           CORE="${VERSION%%-*}"
-          if .github/workflow-scripts/check-docs-version.sh "$CORE" "$RUNNER_TEMP/release-src"; then
-            exit 0
+          if ! .github/workflow-scripts/check-docs-version.sh "$CORE" "$RUNNER_TEMP/release-src" > docs-check.log; then
+            cat docs-check.log
+            { echo "## Docs are not versioned for $CORE"; echo
+              echo "Fix the docs on \`$REF\`, push, and run the release again:"; echo
+              echo '```'; grep -v '^::' docs-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
-          if [ "$PRERELEASE" = true ]; then
-            echo "::warning::The docs are not versioned for $CORE. The stable release $CORE fails until you fix them."
-            echo "**Warning:** the docs are not versioned for $CORE. Fix them on the branch before the stable release." \
-              >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          exit 1
+          cat docs-check.log
 
       - name: Read the release notes draft
         env:
@@ -192,6 +189,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      actions: read # to read who approved the run
       contents: write
       id-token: write
       attestations: write
@@ -202,6 +200,30 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - name: Check that the approver did not make a commit to review
+        if: needs.verify.outputs.review != ''
+        env:
+          REVIEW: ${{ needs.verify.outputs.review }}
+        run: |
+          approvers=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '.[] | select(.state == "approved") | .user.login')
+          for sha in $REVIEW; do
+            commit=$(gh api "repos/$GH_REPO/commits/$sha")
+            # A verified signature binds the committer to an account. Commits that github.com makes
+            # (web-flow) can keep a forged author, for example after "Rebase and merge".
+            committer=$(jq -r '.committer.login // empty' <<<"$commit")
+            if [ "$(jq -r .commit.verification.verified <<<"$commit")" != true ] || [ -z "$committer" ] || [ "$committer" = web-flow ]; then
+              echo "::error::Commit $sha is not signed by the account that committed it. Push it signed from your own account."
+              exit 1
+            fi
+            for login in $committer $(jq -r '.author.login // empty' <<<"$commit"); do
+              if grep -qxF "$login" <<<"$approvers"; then
+                echo "::error::$login approved this run and made commit $sha. Another person must approve."
+                exit 1
+              fi
+            done
+          done
+
       - name: Download the binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
         with:

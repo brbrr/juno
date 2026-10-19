@@ -1,5 +1,6 @@
 // Command check verifies that a release ref can be released: the version and ref match, the tag
-// does not exist, and two people reviewed every commit that is not on main.
+// does not exist, and every commit that is not on main is a clean cherry-pick, docs only, or listed
+// for the release approver to review.
 package main
 
 import (
@@ -10,30 +11,30 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type options struct {
-	ref, version, repo, dir, summary, output, apiURL string
+	ref, version, repo, dir, summary, output string
 }
 
 func main() {
 	var o options
 	flag.StringVar(&o.ref, "ref", "", "branch to release: main or release/vX.Y.Z")
 	flag.StringVar(&o.version, "version", "", "release tag, for example v0.16.9 or v0.16.9-rc.1")
-	flag.StringVar(&o.repo, "repo", "", "GitHub repository as owner/name")
+	flag.StringVar(&o.repo, "repo", "", "GitHub repository as owner/name, for the commit links")
 	flag.StringVar(&o.dir, "dir", ".", "git repository with all branches and tags of origin fetched")
 	flag.StringVar(&o.summary, "summary", "", "file to append the Markdown report to")
 	flag.StringVar(&o.output, "output", "", "file to append the step outputs to")
-	flag.StringVar(&o.apiURL, "api-url", "https://api.github.com", "GitHub API URL")
 	flag.Parse()
 
-	if err := run(context.Background(), &o, os.Getenv("GITHUB_TOKEN")); err != nil {
+	if err := run(context.Background(), &o); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, o *options, token string) error {
+func run(ctx context.Context, o *options) error {
 	v, err := parseVersion(o.version)
 	if err != nil {
 		return err
@@ -62,20 +63,21 @@ func run(ctx context.Context, o *options, token string) error {
 		return err
 	}
 
-	c := &checker{git: g, prs: newGitHubClient(o.apiURL, o.repo, token)}
+	c := &checker{git: g}
 	verdicts, err := c.check(ctx, base, mainTip, sha)
 	if err != nil {
 		return err
 	}
-	if err := appendTo(o.summary, func(w io.Writer) { writeReport(w, v, o.ref, sha, verdicts) }); err != nil {
+	if err := appendTo(o.summary, func(w io.Writer) { writeReport(w, o.repo, v, o.ref, sha, verdicts) }); err != nil {
 		return err
 	}
-	writeReport(os.Stdout, v, o.ref, sha, verdicts)
-	if n := rejected(verdicts); n > 0 {
-		return fmt.Errorf("%d commits on %s are not reviewed", n, o.ref)
+	writeReport(os.Stdout, o.repo, v, o.ref, sha, verdicts)
+	if n := len(withResult(verdicts, rejected)); n > 0 {
+		return fmt.Errorf("%d commits on %s are rejected", n, o.ref)
 	}
 	return appendTo(o.output, func(w io.Writer) {
-		fmt.Fprintf(w, "sha=%s\nprerelease=%s\n", sha, strconv.FormatBool(v.prerelease))
+		fmt.Fprintf(w, "sha=%s\nprerelease=%s\nreview=%s\n", sha, strconv.FormatBool(v.prerelease),
+			strings.Join(withResult(verdicts, needsReview), " "))
 	})
 }
 

@@ -144,23 +144,6 @@ func TestTagExists(t *testing.T) {
 	require.False(t, got)
 }
 
-func TestReleaseBranchesContaining(t *testing.T) {
-	r := newTestRepo(t)
-	old := r.commit("old", map[string]string{"a.go": "package a\n"})
-	r.run("update-ref", "refs/remotes/origin/release/v1.0.0", old)
-	newer := r.commit("new", map[string]string{"b.go": "package b\n"})
-	r.run("update-ref", "refs/remotes/origin/release/v1.0.1", newer)
-	r.run("update-ref", "refs/remotes/origin/feature/x", newer)
-
-	got, err := r.git.releaseBranchesContaining(t.Context(), old)
-	require.NoError(t, err)
-	require.Equal(t, []string{"release/v1.0.0", "release/v1.0.1"}, got)
-
-	got, err = r.git.releaseBranchesContaining(t.Context(), newer)
-	require.NoError(t, err)
-	require.Equal(t, []string{"release/v1.0.1"}, got)
-}
-
 func TestRevParseAndMergeBase(t *testing.T) {
 	r := newTestRepo(t)
 	base := r.head()

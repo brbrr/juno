@@ -1,19 +1,12 @@
 package main
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
-
-type fakePRs map[string]prVerdict // "base sha" -> verdict
-
-func (f fakePRs) checkPR(_ context.Context, base, sha string) (prVerdict, error) {
-	return f[base+" "+sha], nil
-}
 
 func TestCheck(t *testing.T) {
 	r := newTestRepo(t)
@@ -27,53 +20,42 @@ func TestCheck(t *testing.T) {
 	r.run("cherry-pick", fix)
 	pick := r.head()
 	docs := r.commit("docs: version", map[string]string{"docs/versioned/guide.md": "guide\n"})
-	reviewed := r.commit("release fix", map[string]string{"c.go": "package c\n"})
-	r.run("update-ref", "refs/remotes/origin/release/v1.0.0", reviewed)
-	unreviewed := r.commit("unreviewed", map[string]string{"d.go": "package d\n"})
-	retargeted := r.commit("retargeted", map[string]string{"e.go": "package e\n"})
+	releaseOnly := r.commit("release fix", map[string]string{"c.go": "package c\n"})
 	r.run("mv", "docs/guide.md", "guide.md")
 	moved := r.commit("move docs", nil)
-	empty := r.commit("empty", nil)
 	r.run("checkout", "--quiet", "-b", "side")
 	side := r.commit("docs: side", map[string]string{"docs/side.md": "side\n"})
 	r.run("checkout", "--quiet", "release")
 	r.run("merge", "--quiet", "--no-ff", "-m", "merge side", "side")
 	merge := r.head()
-	r.run("update-ref", "refs/remotes/origin/release/v1.0.1", merge)
 
-	c := &checker{git: r.git, prs: fakePRs{
-		"release/v1.0.0 " + reviewed:   {number: 7, approved: true},
-		"release/v1.0.1 " + retargeted: {number: 8, reason: "its base branch changed"},
-	}}
+	c := &checker{git: r.git}
 	verdicts, err := c.check(t.Context(), base, mainTip, merge)
 	require.NoError(t, err)
 
-	type result struct {
-		accepted bool
-		reason   string
+	type outcome struct {
+		result result
+		reason string
 	}
-	got := make(map[string]result, len(verdicts))
+	got := make(map[string]outcome, len(verdicts))
 	for _, v := range verdicts {
-		got[v.sha] = result{v.accepted, v.reason}
+		got[v.sha] = outcome{v.result, v.reason}
 	}
-	notReviewed := "not on main, not docs only, no approved pull request"
-	require.Equal(t, map[string]result{
-		pick:       {true, "cherry-pick of " + fix[:shortSHA]},
-		docs:       {true, "docs only"},
-		reviewed:   {true, "approved pull request #7"},
-		unreviewed: {false, notReviewed},
-		retargeted: {false, notReviewed + ": pull request #8: its base branch changed"},
-		moved:      {false, notReviewed},
-		empty:      {false, notReviewed},
-		side:       {true, "docs only"},
-		merge:      {false, "merge commit"},
+	notOnMain := "not on main and not docs only"
+	require.Equal(t, map[string]outcome{
+		pick:        {accepted, "cherry-pick of " + fix[:shortSHA]},
+		docs:        {accepted, "docs only"},
+		releaseOnly: {needsReview, notOnMain},
+		moved:       {needsReview, notOnMain},
+		side:        {accepted, "docs only"},
+		merge:       {rejected, "merge commit"},
 	}, got)
 }
 
 func TestCheckEmptyRange(t *testing.T) {
 	r := newTestRepo(t)
 	head := r.head()
-	c := &checker{git: r.git, prs: fakePRs{}}
+	c := &checker{git: r.git}
 
 	verdicts, err := c.check(t.Context(), head, head, head)
 	require.NoError(t, err)
@@ -104,11 +86,11 @@ func TestCheckRejectsCherryPickWithModeChange(t *testing.T) {
 	}
 	sameFile, otherFile := makeExecutable("run.sh"), makeExecutable("other.sh")
 
-	c := &checker{git: r.git, prs: fakePRs{}}
+	c := &checker{git: r.git}
 	for sha, want := range map[string]bool{pick: true, sameFile: false, otherFile: false} {
 		verdicts, err := c.check(t.Context(), base, fix, sha)
 		require.NoError(t, err)
 		require.Len(t, verdicts, 1)
-		require.Equal(t, want, verdicts[0].accepted, verdicts[0].reason)
+		require.Equal(t, want, verdicts[0].result == accepted, verdicts[0].reason)
 	}
 }

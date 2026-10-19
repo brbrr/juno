@@ -139,13 +139,3 @@ func (g *gitRepo) changedFiles(ctx context.Context, sha string) ([]string, error
 	}
 	return strings.Split(out, "\n"), nil
 }
-
-// releaseBranchesContaining returns the release branches of origin that contain sha.
-func (g *gitRepo) releaseBranchesContaining(ctx context.Context, sha string) ([]string, error) {
-	out, err := g.run(ctx, "for-each-ref", "--contains", sha, "--format=%(refname:lstrip=3)",
-		"refs/remotes/origin/release/")
-	if err != nil || out == "" {
-		return nil, err
-	}
-	return strings.Split(out, "\n"), nil
-}

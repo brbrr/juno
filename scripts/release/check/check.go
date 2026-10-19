@@ -2,28 +2,30 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 )
 
 const shortSHA = 12
 
-// prFinder decides about the pull request that produced a commit on a release branch.
-type prFinder interface {
-	checkPR(ctx context.Context, base, sha string) (prVerdict, error)
-}
+// result is the decision about one commit of a release ref that is not on main.
+type result int
 
-// verdict tells why a commit is accepted, or why it is rejected.
+const (
+	accepted    result = iota
+	needsReview        // the release approver reads it and must not have made it
+	rejected
+)
+
+// verdict tells what happens to a commit and why.
 type verdict struct {
 	commit
-	accepted bool
-	reason   string
+	result result
+	reason string
 }
 
-// checker decides whether two people reviewed each commit of a release ref that is not on main.
+// checker decides about each commit of a release ref that is not on main.
 type checker struct {
 	git *gitRepo
-	prs prFinder
 }
 
 // check returns a verdict for each commit in base..tip, oldest first.
@@ -57,35 +59,19 @@ func (c *checker) check(ctx context.Context, base, mainTip, tip string) ([]verdi
 // checkCommit decides about one commit. mainSHA is the main commit with the same patch, or empty.
 func (c *checker) checkCommit(ctx context.Context, cm commit, mainSHA string) (verdict, error) {
 	if cm.parents > 1 {
-		return verdict{commit: cm, reason: "merge commit"}, nil
+		return verdict{commit: cm, result: rejected, reason: "merge commit"}, nil
 	}
 	if mainSHA != "" {
-		return verdict{commit: cm, accepted: true, reason: "cherry-pick of " + mainSHA[:shortSHA]}, nil
+		return verdict{commit: cm, result: accepted, reason: "cherry-pick of " + mainSHA[:shortSHA]}, nil
 	}
 	files, err := c.git.changedFiles(ctx, cm.sha)
 	if err != nil {
 		return verdict{}, err
 	}
 	if docsOnly(files) {
-		return verdict{commit: cm, accepted: true, reason: "docs only"}, nil
+		return verdict{commit: cm, result: accepted, reason: "docs only"}, nil
 	}
-	branches, err := c.git.releaseBranchesContaining(ctx, cm.sha)
-	if err != nil {
-		return verdict{}, err
-	}
-	reason := "not on main, not docs only, no approved pull request"
-	for _, branch := range branches {
-		pr, err := c.prs.checkPR(ctx, branch, cm.sha)
-		switch {
-		case err != nil:
-			return verdict{}, err
-		case pr.approved:
-			return verdict{commit: cm, accepted: true, reason: fmt.Sprintf("approved pull request #%d", pr.number)}, nil
-		case pr.number != 0:
-			reason += fmt.Sprintf(": pull request #%d: %s", pr.number, pr.reason)
-		}
-	}
-	return verdict{commit: cm, reason: reason}, nil
+	return verdict{commit: cm, result: needsReview, reason: "not on main and not docs only"}, nil
 }
 
 // docsOnly reports whether files is not empty and every file is under docs/.
