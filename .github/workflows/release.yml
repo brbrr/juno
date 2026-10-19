@@ -277,9 +277,17 @@ jobs:
             crane push "images/$arch" "$STAGING_REPO:$VERSION-$arch" --image-refs "images/$arch.ref"
             refs+=(-m "$(cat "images/$arch.ref")")
           done
-          crane index append "${refs[@]}" -t "$STAGING_REPO:$VERSION"
-          crane copy "$STAGING_REPO:$VERSION" "$OFFICIAL_REPO:$VERSION"
-          echo "digest=$(crane digest "$STAGING_REPO:$VERSION")" >> "$GITHUB_OUTPUT"
+          # Use only the digest pushed here: anyone who can push to a repository can move its tags.
+          index=$(crane index append "${refs[@]}" -t "$STAGING_REPO:$VERSION")
+          digest=${index#*@}
+          crane copy "$STAGING_REPO@$digest" "$OFFICIAL_REPO:$VERSION"
+          for repo in "$STAGING_REPO" "$OFFICIAL_REPO"; do
+            if [ "$(crane digest "$repo:$VERSION")" != "$digest" ]; then
+              echo "::error::$repo:$VERSION does not point to $digest, the image that this run pushed. Investigate now."
+              exit 1
+            fi
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Attest the staging image
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -333,9 +341,16 @@ jobs:
 
       - name: Move the latest tags
         if: needs.verify.outputs.prerelease == 'false'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          crane tag "$STAGING_REPO:$VERSION" latest
-          crane tag "$OFFICIAL_REPO:$VERSION" latest
+          for repo in "$STAGING_REPO" "$OFFICIAL_REPO"; do
+            crane tag "$repo@$DIGEST" latest
+            if [ "$(crane digest "$repo:latest")" != "$DIGEST" ]; then
+              echo "::error::$repo:latest does not point to $DIGEST, the image that this run pushed. Investigate now."
+              exit 1
+            fi
+          done
 
       - name: Log out of Docker Hub
         if: always()
