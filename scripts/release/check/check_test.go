@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -83,4 +85,30 @@ func TestDocsOnly(t *testing.T) {
 	require.False(t, docsOnly([]string{"docs/a.md", "Makefile"}))
 	require.False(t, docsOnly([]string{"docsx/a.md"}))
 	require.False(t, docsOnly(nil))
+}
+
+// TestCheckRejectsCherryPickWithModeChange pins that patch-id --verbatim sees mode changes, also on a
+// file whose content does not change.
+func TestCheckRejectsCherryPickWithModeChange(t *testing.T) {
+	r := newTestRepo(t)
+	base := r.commit("scripts", map[string]string{"run.sh": "echo a\n", "other.sh": "echo o\n"})
+	fix := r.commit("fix", map[string]string{"run.sh": "echo b\n"})
+
+	r.run("checkout", "--quiet", "-b", "release", base)
+	r.run("cherry-pick", fix)
+	pick := r.head()
+	makeExecutable := func(name string) string {
+		r.run("reset", "--quiet", "--hard", base)
+		require.NoError(t, os.Chmod(filepath.Join(r.git.dir, name), 0o700))
+		return r.commit("fix and make "+name+" executable", map[string]string{"run.sh": "echo b\n"})
+	}
+	sameFile, otherFile := makeExecutable("run.sh"), makeExecutable("other.sh")
+
+	c := &checker{git: r.git, prs: fakePRs{}}
+	for sha, want := range map[string]bool{pick: true, sameFile: false, otherFile: false} {
+		verdicts, err := c.check(t.Context(), base, fix, sha)
+		require.NoError(t, err)
+		require.Len(t, verdicts, 1)
+		require.Equal(t, want, verdicts[0].accepted, verdicts[0].reason)
+	}
 }
